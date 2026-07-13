@@ -1,0 +1,18 @@
+# ---------- Build Stage ----------
+ARG TS_VERSION=v1.90.6
+FROM --platform=$BUILDPLATFORM golang:1.25 AS builder
+
+ENV GOPROXY=https://goproxy.cn,direct
+ENV CGO_ENABLED=0
+ENV GOTOOLCHAIN=auto
+
+ARG TS_VERSION
+RUN GOOS=linux GOARCH=amd64 go install tailscale.com/cmd/derper@${TS_VERSION}
+
+# ---------- Runtime ----------
+FROM gcr.io/distroless/static-debian12
+
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /go/bin/derper /usr/local/bin/derper
+
+ENTRYPOINT ["/usr/local/bin/derper"]
