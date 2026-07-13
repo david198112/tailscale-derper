@@ -1,11 +1,16 @@
 # syntax=docker/dockerfile:1.7
 
+############################
+# Build arguments
+############################
+
 ARG GO_VERSION=1.25
 ARG TS_VERSION=v1.90.6
 
-########################
+############################
 # Builder
-########################
+############################
+
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS builder
 
 ARG TARGETOS
@@ -16,29 +21,46 @@ ENV CGO_ENABLED=0
 ENV GOPROXY=https://goproxy.cn,direct
 ENV GOTOOLCHAIN=auto
 
-# ✅ 用 go build -o 锁定产物路径，不用 go install（交叉编译下 go install 产物在子目录）
-RUN GOOS=${TARGETOS} \
-    GOARCH=${TARGETARCH} \
-    go build -o /out/derper tailscale.com/cmd/derper@${TS_VERSION}
+WORKDIR /src
 
-########################
+# 下载指定版本源码
+RUN git clone \
+    --depth=1 \
+    --branch ${TS_VERSION} \
+    https://github.com/tailscale/tailscale.git .
+
+# 编译
+RUN mkdir -p /out && \
+    GOOS=${TARGETOS} \
+    GOARCH=${TARGETARCH} \
+    go build \
+      -trimpath \
+      -ldflags="-s -w -buildid=" \
+      -o /out/derper \
+      ./cmd/derper
+
+############################
 # Runtime
-########################
+############################
+
 FROM gcr.io/distroless/static-debian12
 
-LABEL org.opencontainers.image.title="DERPER"
-LABEL org.opencontainers.image.vendor="Dehui Xu"
-LABEL org.opencontainers.image.licenses="BSD-3-Clause"
-LABEL org.opencontainers.image.source="https://github.com/你的用户名/tailscale-derper"
-
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-# ✅ COPY 从 /out/derper 拿，路径确定
+
 COPY --from=builder /out/derper /usr/local/bin/derper
 
 USER 65532:65532
+
+WORKDIR /var/lib/derper
+
 VOLUME ["/var/lib/derper"]
 
+#
+# 只是告诉别人这个程序通常会监听什么端口
+# 实际监听端口全部由 docker compose command 决定
+#
 EXPOSE 443/tcp
+EXPOSE 80/tcp
 EXPOSE 3478/udp
 
 ENTRYPOINT ["/usr/local/bin/derper"]
