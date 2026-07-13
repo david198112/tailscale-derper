@@ -1,62 +1,117 @@
-name: Build & Push derper
+name: Build and Push DERP Server
 
+# 触发策略（按你的建议优化）：
+# 1. 主用：手动触发（更新 latest，推荐家用/个人维护）
+# 2. 可选：定时自动检测 Tailscale 最新 Release（仅构建新版本，不打 latest，需要时取消注释）
 on:
   workflow_dispatch:
     inputs:
-      ts_version:
-        description: 'Tailscale version (e.g. v1.90.6)'
+      tailscale_version:
+        description: 'Tailscale 版本（如 v1.90.6，手动触发时更新 latest）'
         required: true
         default: 'v1.90.6'
-  schedule:
-    - cron: '0 18 * * *'
+        type: string
+  # 可选：自动检测 Tailscale 最新稳定版并构建（默认关闭，需要时取消注释）
+  # schedule:
+  #   - cron: '0 18 * * *'  # 北京时间凌晨2点
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/derper
+  IMAGE_NAME: ${{ github.repository }}
+  # 默认 Tailscale 版本（仅作为兜底，优先用手动输入/自动检测的结果）
+  DEFAULT_TS_VERSION: v1.90.6
 
 jobs:
-  build:
+  build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+      attestations: write
+      id-token: write
 
     steps:
-      - name: 解析版本
-        id: ver
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TS_VER="${{ github.event.inputs.ts_version }}"
-          else
-            TS_VER="v1.90.6"
-          fi
-          echo "ts_ver=${TS_VER}" >> $GITHUB_OUTPUT
-          echo "img_tag=${TS_VER}" >> $GITHUB_OUTPUT
-
-      - name: Checkout
+      - name: Checkout 代码
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: 确定构建版本
+        id: get_version
+        run: |
+          # 1. 手动触发：用输入的版本
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TS_VERSION="${{ github.event.inputs.tailscale_version }}"
+            UPDATE_LATEST=true
+            echo "🔧 手动触发构建：${TS_VERSION}，将更新 latest 标签"
+          # 2. 定时触发：自动检测 Tailscale 最新稳定 Release
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "🔍 自动检测 Tailscale 最新稳定 Release..."
+            TS_VERSION=$(curl -s https://api.github.com/repos/tailscale/tailscale/releases/latest \
+              | jq -r '.tag_name')
+            UPDATE_LATEST=false
+            echo "🤖 自动检测到最新版本：${TS_VERSION}，不打 latest 标签"
+          # 3. 兜底：用默认版本
+          else
+            TS_VERSION="${{ env.DEFAULT_TS_VERSION }}"
+            UPDATE_LATEST=false
+            echo "⚠️ 使用默认版本：${TS_VERSION}"
+          fi
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+          # 校验版本号格式（必须以 v 开头，符合 SemVer）
+          if [[ ! "${TS_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ 无效的版本号格式：${TS_VERSION}，应为 vX.Y.Z"
+            exit 1
+          fi
+
+          echo "version=${TS_VERSION}" >> $GITHUB_OUTPUT
+          echo "update_latest=${UPDATE_LATEST}" >> $GITHUB_OUTPUT
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & Push
-        uses: docker/build-push-action@v6
+      - name: 生成镜像元数据（含 Semver 多 Tag）
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # 按你的建议生成 Semver 多 Tag：v1.90.6 → 1.90.6 → 1.90 → 1
+          tags: |
+            # 版本 Tag（所有触发方式都打）
+            type=semver,pattern={{version}},value=${{ steps.get_version.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.get_version.outputs.version }}
+            type=semver,pattern={{major}},value=${{ steps.get_version.outputs.version }}
+            # latest Tag（仅手动触发时打）
+            type=raw,value=latest,enable=${{ steps.get_version.outputs.update_latest == 'true' }}
+          labels: |
+            # 按你的建议完善 OCI 标准 Label
+            org.opencontainers.image.title=DERPER
+            org.opencontainers.image.description=Tailscale DERP Server (Self-hosted)
+            org.opencontainers.image.vendor=Dehui Xu
+            org.opencontainers.image.licenses=BSD-3-Clause
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.get_version.outputs.version }}
+
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v7
         with:
           context: .
-          file: Dockerfile.derper
-          platforms: linux/amd64
+          file: ./Dockerfile.derper
+          platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.img_tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 仅传 TS_VERSION（按你的建议，GO_VERSION 留在 Dockerfile 中定义）
           build-args: |
-            TS_VERSION=${{ steps.ver.outputs.ts_ver }}
+            TS_VERSION=${{ steps.get_version.outputs.version }}
+          # 按你的建议开启 Provenance/SBOM
+          provenance: true
+          sbom: true
+          # GitHub 原生缓存，加速构建
           cache-from: type=gha
           cache-to: type=gha,mode=max
