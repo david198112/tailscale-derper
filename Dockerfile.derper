@@ -16,34 +16,29 @@ ENV CGO_ENABLED=0
 ENV GOPROXY=https://goproxy.cn,direct
 ENV GOTOOLCHAIN=auto
 
+# ✅ 用 go build -o 锁定产物路径，不用 go install（交叉编译下 go install 产物在子目录）
 RUN GOOS=${TARGETOS} \
     GOARCH=${TARGETARCH} \
-    go install tailscale.com/cmd/derper@${TS_VERSION}
+    go build -o /out/derper tailscale.com/cmd/derper@${TS_VERSION}
 
 ########################
-# Runtime（家用极简版）
+# Runtime
 ########################
 FROM gcr.io/distroless/static-debian12
 
-# 基础元数据（不影响运行，可选留）
 LABEL org.opencontainers.image.title="DERPER"
+LABEL org.opencontainers.image.vendor="Dehui Xu"
+LABEL org.opencontainers.image.licenses="BSD-3-Clause"
 LABEL org.opencontainers.image.source="https://github.com/你的用户名/tailscale-derper"
 
-# 1. 必须：CA 证书，否则 derper 出 HTTPS 请求会 x509 报错
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# ✅ COPY 从 /out/derper 拿，路径确定
+COPY --from=builder /out/derper /usr/local/bin/derper
 
-# 2. 必须：拷贝 derper 二进制
-COPY --from=builder /go/bin/derper /usr/local/bin/derper
-
-# 3. 非 root 运行（Distroless 官方推荐 UID 65532，不用写用户名，避免不存在的用户报错）
 USER 65532:65532
-
-# 4. 持久化 derper.key（和 compose 的 ./data 挂载对齐，重启不丢身份）
 VOLUME ["/var/lib/derper"]
 
-# 5. 声明实际使用的端口（和 Lucky 反代、compose 端口映射对齐）
 EXPOSE 443/tcp
 EXPOSE 3478/udp
 
-# ✅ 核心：ENTRYPOINT 只放二进制，不带任何参数，所有参数由 compose 传入
 ENTRYPOINT ["/usr/local/bin/derper"]
